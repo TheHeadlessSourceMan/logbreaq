@@ -1,0 +1,33 @@
+{
+  "name": "logseq-graph-splitter",
+  "version": "0.0.1",
+  "description": "Safely move pages from one Logseq graph into another while preserving links and assets.",
+  "license": "SEE LICENSE IN LICENSE",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.html",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@logseq/libs": "^0.0.17"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^2.1.8",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "vite-plugin-logseq": "^1.1.2",
+    "vitest": "^2.1.8"
+  },
+  "logseq": {
+    "id": "logseq-graph-splitter",
+    "title": "Graph Splitter",
+    "icon": "./icon.svg",
+    "main": "dist/index.html"
+  }
+}
