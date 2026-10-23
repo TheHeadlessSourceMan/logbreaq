@@ -1,18 +1,18 @@
 import type { MigrationReport, MigrationRequest, MigrationStatus } from '../model/types';
-import { detectConflicts } from '../conflicts/conflictDetection';
-import { containsAbort, isCompleteResolution } from '../conflicts/conflictResolver';
+import { detectAndResolveConflicts } from '../conflicts/conflictResolution';
 import { determineAffectedPages } from '../indexing/backlinkIndex';
 import { planAssetMigration } from '../indexing/assetUsageIndex';
-import { updatePageLocationIndex } from '../indexing/pageLocationIndex';
+import { loadLocationIndex, updatePageLocationIndex } from '../indexing/pageLocationIndex';
 import { regenerateLinksInBacklinkPages, regenerateLinksInMovedPages } from '../rendering/linkRegeneration';
 import { buildReport } from '../reporting/migrationReport';
 import { createSnapshot, restoreSnapshot } from '../rollback/snapshot';
 import { runIntegrityValidation } from '../validation/integrityValidation';
 import { validateSourcePages, verifySourceGraphHealth } from '../validation/sourceValidation';
-import { rewriteAssetReferences } from './assetReferences';
+import { rewriteAssetReferences, transferAssets } from './assetReferences';
+import { commitRemovals } from './commitRemovals';
 import {
-  MigrationAbortedError,
   createInitialState,
+  describeError,
   type MigrationContext,
   type MigrationDependencies,
 } from './migrationContext';
@@ -28,38 +28,28 @@ export interface MigrationStep {
 /** Step id after which graph files may have changed and rollback is required on failure. */
 export const SNAPSHOT_STEP_ID = 'create-snapshot';
 
-/** Step 3 (continued): pre-flight conflict detection and user resolution. */
-export async function detectAndResolveConflicts(ctx: MigrationContext): Promise<void> {
-  const conflicts = await detectConflicts(ctx);
-  ctx.state.conflicts = conflicts;
-  if (conflicts.length === 0) {
-    return;
-  }
-  const resolutions = await ctx.deps.conflictResolver.resolve(conflicts);
-  ctx.state.resolvedConflicts = [...resolutions];
-  if (!isCompleteResolution(conflicts, resolutions)) {
-    throw new MigrationAbortedError('Not every conflict received a resolution.');
-  }
-  if (containsAbort(resolutions)) {
-    throw new MigrationAbortedError('Migration aborted by user during conflict resolution.');
-  }
-}
-
-/** The PAGE MOVE WORKFLOW, in order. Step 13 (report) is produced by runMigration itself. */
+/**
+ * The PAGE MOVE WORKFLOW. Read-only analysis (steps 6 and 7) runs before the snapshot so the
+ * snapshot can include every affected page and asset. Source files are deleted only after
+ * integrity validation. Step 13 (report) is produced by runMigration itself.
+ */
 export const MIGRATION_STEPS: readonly MigrationStep[] = [
   { id: 'validate-source-pages', title: '1. Validate source pages', run: validateSourcePages },
   { id: 'verify-source-graph', title: '2. Verify source graph health', run: verifySourceGraphHealth },
   { id: 'ensure-target-graph', title: '3. Create target graph if missing', run: ensureTargetGraph },
   { id: 'resolve-conflicts', title: '3. Detect and resolve conflicts', run: detectAndResolveConflicts },
-  { id: SNAPSHOT_STEP_ID, title: '4. Create migration snapshot', run: createSnapshot },
-  { id: 'update-location-index', title: '5. Update page location index', run: updatePageLocationIndex },
+  { id: 'load-location-index', title: '5. Load page location index', run: loadLocationIndex },
   { id: 'determine-affected-pages', title: '6. Determine affected pages', run: determineAffectedPages },
   { id: 'plan-assets', title: '7. Analyze assets', run: planAssetMigration },
-  { id: 'move-pages', title: '8. Move page files', run: movePageFiles },
+  { id: SNAPSHOT_STEP_ID, title: '4. Create migration snapshot', run: createSnapshot },
+  { id: 'update-location-index', title: '5. Update page location index', run: updatePageLocationIndex },
+  { id: 'move-pages', title: '8. Copy page files', run: movePageFiles },
+  { id: 'transfer-assets', title: '8. Copy assets', run: transferAssets },
   { id: 'regenerate-moved-links', title: '9. Regenerate links in moved pages', run: regenerateLinksInMovedPages },
   { id: 'regenerate-backlinks', title: '10. Regenerate links in backlink pages', run: regenerateLinksInBacklinkPages },
   { id: 'rewrite-assets', title: '11. Rewrite asset references', run: rewriteAssetReferences },
   { id: 'validate-integrity', title: '12. Run integrity validation', run: runIntegrityValidation },
+  { id: 'commit-removals', title: '12. Remove moved originals', run: commitRemovals },
 ];
 
 /** Runs a migration atomically: all steps succeed, or the snapshot is restored. */
@@ -69,7 +59,7 @@ export async function runMigration(
   steps: readonly MigrationStep[] = MIGRATION_STEPS,
 ): Promise<MigrationReport> {
   const startedAt = deps.now();
-  const ctx: MigrationContext = { request, deps, state: createInitialState() };
+  const ctx: MigrationContext = { request, deps, state: createInitialState(request) };
   const completedSteps: string[] = [];
   const errors: string[] = [];
   let status: MigrationStatus = 'succeeded';
@@ -88,6 +78,9 @@ export async function runMigration(
 
     if (!completedSteps.includes(SNAPSHOT_STEP_ID)) {
       status = 'aborted';
+      if (ctx.state.targetGraphCreated) {
+        ctx.state.warnings.push(`The new, empty target graph folder was left at ${request.targetGraph.path}.`);
+      }
     } else {
       try {
         await restoreSnapshot(ctx);
@@ -110,8 +103,4 @@ export async function runMigration(
   });
   deps.logger.info(`Migration ${request.id} finished: ${status}`, report);
   return report;
-}
-
-function describeError(error: unknown): string {
-  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 }

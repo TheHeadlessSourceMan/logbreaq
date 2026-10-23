@@ -1,35 +1,16 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import type { ConflictResolver } from '../src/conflicts/conflictResolver';
-import * as conflictDetection from '../src/conflicts/conflictDetection';
-import { silentLogger } from '../src/logging/logger';
-import type { MigrationDependencies } from '../src/migration/migrationContext';
-import {
-  MIGRATION_STEPS,
-  SNAPSHOT_STEP_ID,
-  runMigration,
-  type MigrationStep,
-} from '../src/migration/migrationWorkflow';
-import { DEFAULT_GRAPH_LAYOUT, type Conflict, type MigrationRequest } from '../src/model/types';
-import { LogseqUrlLinkRenderer } from '../src/rendering/linkRenderer';
-import * as snapshot from '../src/rollback/snapshot';
+import { MIGRATION_STEPS, SNAPSHOT_STEP_ID, runMigration, type MigrationStep } from '../src/migration/migrationWorkflow';
+import { GRAPH_A, GRAPH_B, makeDeps, makeRequest, pagePath, seedGraph } from './support/fixtures';
+import { MemoryFileSystem } from './support/memoryFileSystem';
 
-const request: MigrationRequest = {
-  id: 'req-1',
-  sourceGraph: { name: 'A', path: '/graphs/A' },
-  targetGraph: { name: 'B', path: '/graphs/B' },
-  pages: ['Page X'],
-  layout: DEFAULT_GRAPH_LAYOUT,
-  requestedAt: new Date(0),
-};
-
-function deps(resolver?: ConflictResolver): MigrationDependencies {
-  let t = 0;
-  return {
-    logger: silentLogger,
-    linkRenderer: new LogseqUrlLinkRenderer(),
-    conflictResolver: resolver ?? { resolve: async () => [] },
-    now: () => (t += 5),
-  };
+async function setup(b: Parameters<typeof seedGraph>[2] = {}) {
+  const fs = new MemoryFileSystem();
+  await seedGraph(fs, GRAPH_A, { pages: { 'X.md': '- [[Y]]', 'Y.md': '- [[X]]' } });
+  if (Object.keys(b).length > 0) {
+    await seedGraph(fs, GRAPH_B, b);
+  }
+  return fs;
 }
 
 function failingAt(stepId: string): MigrationStep[] {
@@ -40,76 +21,82 @@ function failingAt(stepId: string): MigrationStep[] {
   );
 }
 
-const conflict: Conflict = { kind: 'page-name', subject: 'Page X', existing: 'page x' };
-
-afterEach(() => vi.restoreAllMocks());
+function resolveAll(resolution: 'abort' | 'skip'): ConflictResolver {
+  return { resolve: async (cs) => cs.map((conflict) => ({ conflict, resolution: { kind: resolution } })) };
+}
 
 describe('runMigration', () => {
   it('runs every workflow step in order and succeeds', async () => {
-    const report = await runMigration(request, deps());
+    const fs = await setup();
+    const report = await runMigration(makeRequest(['X']), makeDeps(fs));
     expect(report.status).toBe('succeeded');
     expect(report.completedSteps).toEqual(MIGRATION_STEPS.map((s) => s.id));
     expect(report.errors).toEqual([]);
-    expect(report.durationMs).toBe(5);
+    expect(report.pagesMoved).toEqual(['X']);
+    expect(report.durationMs).toBeGreaterThan(0);
   });
 
-  it('aborts without rollback when failing before the snapshot', async () => {
-    const restore = vi.spyOn(snapshot, 'restoreSnapshot');
-    const report = await runMigration(request, deps(), failingAt('verify-source-graph'));
+  it('aborts without touching anything when failing before the snapshot', async () => {
+    const fs = await setup();
+    const report = await runMigration(makeRequest(['X']), makeDeps(fs), failingAt('verify-source-graph'));
     expect(report.status).toBe('aborted');
     expect(report.completedSteps).toEqual(['validate-source-pages']);
     expect(report.errors).toEqual(['Error: boom at verify-source-graph']);
-    expect(restore).not.toHaveBeenCalled();
+    expect(report.rollbackLog).toEqual([]);
+    expect(await fs.exists(GRAPH_B.path)).toBe(false);
+  });
+
+  it('mentions a newly created target folder that was left behind on abort', async () => {
+    const fs = await setup();
+    const report = await runMigration(makeRequest(['X']), makeDeps(fs), failingAt('load-location-index'));
+    expect(report.status).toBe('aborted');
+    expect(report.warnings).toContain(`The new, empty target graph folder was left at ${GRAPH_B.path}.`);
   });
 
   it('rolls back when failing after the snapshot', async () => {
-    const restore = vi.spyOn(snapshot, 'restoreSnapshot');
-    const report = await runMigration(request, deps(), failingAt('move-pages'));
+    const fs = await setup();
+    const report = await runMigration(makeRequest(['X']), makeDeps(fs), failingAt('regenerate-backlinks'));
     expect(report.status).toBe('rolled-back');
     expect(report.completedSteps).toContain(SNAPSHOT_STEP_ID);
-    expect(report.completedSteps).not.toContain('move-pages');
-    expect(restore).toHaveBeenCalledOnce();
+    expect(report.rollbackLog).toContain(`Removed ${pagePath(GRAPH_B, 'X.md')}`);
+    expect(fs.has(pagePath(GRAPH_B, 'X.md'))).toBe(false);
+    expect(fs.text(pagePath(GRAPH_A, 'X.md'))).toBe('- [[Y]]');
   });
 
   it('reports rollback failure', async () => {
-    vi.spyOn(snapshot, 'restoreSnapshot').mockRejectedValue(new Error('disk gone'));
-    const report = await runMigration(request, deps(), failingAt('validate-integrity'));
+    const fs = await setup();
+    const steps = failingAt('validate-integrity');
+    fs.failOn = (op) => op === 'remove';
+    const report = await runMigration(makeRequest(['X']), makeDeps(fs), steps);
     expect(report.status).toBe('rollback-failed');
-    expect(report.errors).toEqual(['Error: boom at validate-integrity', 'Rollback failed: Error: disk gone']);
+    expect(report.errors[0]).toBe('Error: boom at validate-integrity');
+    expect(report.errors[1]).toMatch(/^Rollback failed: Error: Rollback incomplete/);
   });
 
   it('records non-Error throwables', async () => {
+    const fs = await setup();
     const steps: MigrationStep[] = [{ id: 'x', title: 'x', run: () => Promise.reject('plain') }];
-    const report = await runMigration(request, deps(), steps);
+    const report = await runMigration(makeRequest(['X']), makeDeps(fs), steps);
     expect(report.errors).toEqual(['plain']);
   });
 
   describe('conflict resolution', () => {
-    it('continues when every conflict is resolved', async () => {
-      vi.spyOn(conflictDetection, 'detectConflicts').mockResolvedValue([conflict]);
-      const resolver: ConflictResolver = {
-        resolve: async (cs) => cs.map((c) => ({ conflict: c, resolution: { kind: 'rename', newName: 'Page X (2)' } })),
-      };
-      const report = await runMigration(request, deps(resolver));
+    it('skips conflicting pages and reports the resolution', async () => {
+      const fs = await setup({ pages: { 'X.md': '- B version' } });
+      const report = await runMigration(makeRequest(['X', 'Y']), makeDeps(fs, { conflictResolver: resolveAll('skip') }));
       expect(report.status).toBe('succeeded');
-      expect(report.conflicts).toHaveLength(1);
+      expect(report.pagesMoved).toEqual(['Y']);
+      expect(report.conflicts).toEqual([
+        { conflict: { kind: 'page-name', subject: 'X', existing: 'X' }, resolution: { kind: 'skip' } },
+      ]);
+      expect(fs.text(pagePath(GRAPH_B, 'X.md'))).toBe('- B version');
     });
 
     it('aborts when the user chooses abort', async () => {
-      vi.spyOn(conflictDetection, 'detectConflicts').mockResolvedValue([conflict]);
-      const resolver: ConflictResolver = {
-        resolve: async (cs) => cs.map((c) => ({ conflict: c, resolution: { kind: 'abort' } })),
-      };
-      const report = await runMigration(request, deps(resolver));
+      const fs = await setup({ pages: { 'X.md': '- B version' } });
+      const report = await runMigration(makeRequest(['X']), makeDeps(fs, { conflictResolver: resolveAll('abort') }));
       expect(report.status).toBe('aborted');
       expect(report.errors[0]).toMatch(/aborted by user/);
-    });
-
-    it('aborts when a conflict is left unresolved', async () => {
-      vi.spyOn(conflictDetection, 'detectConflicts').mockResolvedValue([conflict]);
-      const report = await runMigration(request, deps({ resolve: async () => [] }));
-      expect(report.status).toBe('aborted');
-      expect(report.errors[0]).toMatch(/Not every conflict/);
     });
   });
 });

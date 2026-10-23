@@ -1,6 +1,7 @@
 import '@logseq/libs';
 import type { PageEntity } from '@logseq/libs/dist/LSPlugin';
 import './ui/styles.css';
+import { createUnavailableFileSystem } from './fs/unavailableFileSystem';
 import { ConsoleLogger } from './logging/logger';
 import { buildMigrationRequest } from './migration/migrationRequest';
 import { runMigration } from './migration/migrationWorkflow';
@@ -35,6 +36,7 @@ function main(): void {
   }
 
   const deps: MigrationDependencies = {
+    fs: createUnavailableFileSystem(),
     logger,
     linkRenderer: new LogseqUrlLinkRenderer(),
     conflictResolver: createDialogConflictResolver(),

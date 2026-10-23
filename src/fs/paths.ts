@@ -23,3 +23,21 @@ export function baseName(path: string): string {
   const index = normalized.lastIndexOf('/');
   return index === -1 ? normalized : normalized.slice(index + 1);
 }
+
+export function joinPath(base: string, ...parts: string[]): string {
+  return normalizePath([base, ...parts].filter((p) => p !== '').join('/'));
+}
+
+export function parentPath(path: string): string {
+  const normalized = normalizePath(path);
+  const index = normalized.lastIndexOf('/');
+  if (index === -1) {
+    return '';
+  }
+  return index === 0 ? '/' : normalized.slice(0, index);
+}
+
+export function splitExtension(name: string): { stem: string; ext: string } {
+  const index = name.lastIndexOf('.');
+  return index <= 0 ? { stem: name, ext: '' } : { stem: name.slice(0, index), ext: name.slice(index) };
+}

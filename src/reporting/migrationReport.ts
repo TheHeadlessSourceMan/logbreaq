@@ -24,6 +24,7 @@ export function buildReport(input: ReportInput): MigrationReport {
     conflicts: [...state.resolvedConflicts],
     warnings: [...state.warnings],
     errors: [...input.errors],
+    rollbackLog: [...state.rollbackLog],
     durationMs: input.durationMs,
   };
 }

@@ -13,7 +13,12 @@ export interface GraphLayout {
   readonly journalsDir: string;
   readonly assetsDir: string;
   readonly logseqDir: string;
-  readonly configFile: string;
+  /** Persisted Page Location Index, written into every graph involved in a migration. */
+  readonly indexFile: string;
+  /** Snapshots are written below this folder of the source graph. */
+  readonly backupDir: string;
+  /** Logseq `:journal/page-title-format`. */
+  readonly journalTitleFormat: string;
 }
 
 export const DEFAULT_GRAPH_LAYOUT: GraphLayout = {
@@ -21,7 +26,9 @@ export const DEFAULT_GRAPH_LAYOUT: GraphLayout = {
   journalsDir: 'journals',
   assetsDir: 'assets',
   logseqDir: 'logseq',
-  configFile: 'logseq/config.edn',
+  indexFile: 'logseq/graph-splitter/page-locations.json',
+  backupDir: 'logseq/bak/graph-splitter',
+  journalTitleFormat: 'MMM do, yyyy',
 };
 
 /** A single, atomic request to move one or more pages between graphs. */
@@ -34,15 +41,6 @@ export interface MigrationRequest {
   readonly layout: GraphLayout;
   readonly requestedAt: Date;
 }
-
-/** Page name -> absolute graph path. Source of truth for link rendering. */
-export type PageLocationIndex = ReadonlyMap<string, string>;
-
-/** Target page -> pages that link to it. */
-export type BacklinkIndex = ReadonlyMap<string, ReadonlySet<string>>;
-
-/** Asset file name -> pages that reference it. */
-export type AssetUsageIndex = ReadonlyMap<string, ReadonlySet<string>>;
 
 export type ConflictKind = 'page-name' | 'asset-name' | 'selection-collision';
 
@@ -70,9 +68,14 @@ export interface ResolvedConflict {
 export type AssetActionKind = 'move' | 'copy' | 'reuse';
 
 export interface AssetAction {
+  /** Path relative to the source assets folder, in its on-disk casing. */
   readonly asset: string;
+  readonly sourcePath: string;
   readonly action: AssetActionKind;
+  /** Path relative to the target assets folder. */
   readonly targetName: string;
+  readonly targetPath: string;
+  readonly sha256: string;
 }
 
 export interface FileOperation {
@@ -113,5 +116,6 @@ export interface MigrationReport {
   readonly conflicts: readonly ResolvedConflict[];
   readonly warnings: readonly string[];
   readonly errors: readonly string[];
+  readonly rollbackLog: readonly string[];
   readonly durationMs: number;
 }
