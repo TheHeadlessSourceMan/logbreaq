@@ -1,5 +1,5 @@
 {
-  "name": "logseq-graph-splitter",
+  "name": "logforq",
   "version": "0.0.1",
   "description": "Safely move pages from one Logseq graph into another while preserving links and assets.",
   "license": "SEE LICENSE IN LICENSE",
@@ -25,7 +25,7 @@
     "vitest": "^2.1.8"
   },
   "logseq": {
-    "id": "logseq-graph-splitter",
+    "id": "logforq",
     "title": "Graph Splitter",
     "icon": "./icon.svg",
     "main": "dist/index.html"

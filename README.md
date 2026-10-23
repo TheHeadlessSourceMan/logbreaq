@@ -1,4 +1,4 @@
-# logbreaq — Graph Splitter for Logseq
+# logforq — Graph Splitter for Logseq
 
 Break parts of Logseq graphs off into smaller graphs.
 
